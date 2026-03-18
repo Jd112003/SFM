@@ -1,0 +1,46 @@
+x-sfm-common: &sfm-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: sfm-object-pipeline:latest
+  working_dir: /workspace
+  entrypoint: ["python", "-m", "sfm_pipeline"]
+  command: ["--help"]
+  user: "${UID:-1000}:${GID:-1000}"
+  volumes:
+    - .:/workspace
+  environment:
+    PYTHONUNBUFFERED: "1"
+  init: true
+
+x-colmap-common: &colmap-common
+  image: colmap/colmap:latest
+  working_dir: /workspace
+  entrypoint: ["colmap"]
+  command: ["help"]
+  user: "${UID:-1000}:${GID:-1000}"
+  volumes:
+    - .:/workspace
+  init: true
+
+services:
+  sfm:
+    <<: *sfm-common
+
+  sfm-gpu:
+    <<: *sfm-common
+    environment:
+      PYTHONUNBUFFERED: "1"
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+    gpus: all
+
+  colmap:
+    <<: *colmap-common
+
+  colmap-gpu:
+    <<: *colmap-common
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+    gpus: all

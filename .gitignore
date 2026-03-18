@@ -1,0 +1,17 @@
+.venv/
+.uv-cache/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+outputs/
+
+leon/
+estatua/
+buda/
+data/
+
+*.db
+*.sqlite
+*.log

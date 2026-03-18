@@ -1,0 +1,29 @@
+paths:
+  data_dir: .
+  outputs_dir: outputs
+
+colmap:
+  camera_model: SIMPLE_RADIAL
+  matcher: sequential
+  use_gpu: true
+  gpu_index: 0
+  max_image_size: 1200
+  sift_max_num_features: 4096
+  sequential_overlap: 10
+  mapper_min_num_matches: 15
+
+ablation:
+  subset_sizes: [20, 40, 80, 160]
+  runs_per_size: 2
+
+graph:
+  min_inliers: 15
+  min_inlier_ratio: 0.15
+
+doppelgangers:
+  min_visual_matches: 80
+  max_inlier_ratio: 0.25
+  top_k: 15
+
+report:
+  include_success_plot: true

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sfm-object-pipeline"
+version = "0.1.0"
+description = "Reproducible SfM pipeline for object reconstruction experiments with COLMAP."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.24",
+  "PyYAML>=6.0",
+]
+
+[project.scripts]
+sfm-pipeline = "sfm_pipeline.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
