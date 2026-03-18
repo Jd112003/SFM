@@ -6,7 +6,7 @@ x-sfm-common: &sfm-common
   working_dir: /workspace
   entrypoint: ["python", "-m", "sfm_pipeline"]
   command: ["--help"]
-  user: "${UID:-1000}:${GID:-1000}"
+  user: "${SFM_UID:-1000}:${SFM_GID:-1000}"
   volumes:
     - .:/workspace
   environment:
@@ -18,7 +18,7 @@ x-colmap-common: &colmap-common
   working_dir: /workspace
   entrypoint: ["colmap"]
   command: ["help"]
-  user: "${UID:-1000}:${GID:-1000}"
+  user: "${SFM_UID:-1000}:${SFM_GID:-1000}"
   volumes:
     - .:/workspace
   init: true

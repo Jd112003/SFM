@@ -7,6 +7,8 @@ cd "${ROOT_DIR}"
 CONFIG_PATH="${CONFIG_PATH:-config.a100.yaml}"
 OBJECT_ID="${OBJECT_ID:-leon}"
 SERVICE_NAME="${SERVICE_NAME:-sfm-gpu}"
+export SFM_UID="${SFM_UID:-$(id -u)}"
+export SFM_GID="${SFM_GID:-$(id -g)}"
 
 run_step() {
   local step="$1"
