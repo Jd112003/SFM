@@ -27,6 +27,7 @@ docker compose build sfm
 run_step prepare
 run_step extract-match
 run_step reconstruct
+run_step clean-model
 run_step analyze-graph
 run_step detect-doppelgangers
 run_step run-ablation
@@ -35,3 +36,4 @@ run_step report
 echo
 echo "==> Pipeline completed"
 echo "Outputs available under outputs/${OBJECT_ID}/"
+echo "Filtered model available under outputs/${OBJECT_ID}/reconstruction/filtered_text_model/"

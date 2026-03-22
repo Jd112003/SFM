@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import random
 import shutil
+import sqlite3
 from pathlib import Path
 
 from sfm_pipeline.analysis import (
@@ -14,6 +16,7 @@ from sfm_pipeline.analysis import (
     detect_doppelgangers,
     export_graph_dot,
     export_graph_html,
+    filter_sparse_text_model,
     load_metrics,
     read_image_manifest,
     write_doppelgangers,
@@ -36,6 +39,7 @@ def parse_args() -> argparse.Namespace:
         "prepare",
         "extract-match",
         "reconstruct",
+        "clean-model",
         "analyze-graph",
         "detect-doppelgangers",
         "run-ablation",
@@ -59,9 +63,11 @@ def object_paths(config: dict, object_id: str, root_dir: Path) -> dict[str, Path
         "database_path": outputs_dir / "database.db",
         "sparse_dir": outputs_dir / "reconstruction" / "sparse",
         "model_text_dir": outputs_dir / "reconstruction" / "text_model",
+        "filtered_model_text_dir": outputs_dir / "reconstruction" / "filtered_text_model",
         "graphs_dir": outputs_dir / "graphs",
         "metrics_dir": outputs_dir / "metrics",
         "doppel_dir": outputs_dir / "doppelgangers",
+        "doppel_database_path": outputs_dir / "doppelgangers" / "database.db",
         "ablation_dir": outputs_dir / "ablation",
     }
 
@@ -131,6 +137,18 @@ def cmd_reconstruct(config: dict, paths: dict[str, Path], object_id: str) -> Non
     )
 
 
+def cmd_clean_model(config: dict, paths: dict[str, Path]) -> None:
+    if not paths["model_text_dir"].exists():
+        raise FileNotFoundError(
+            f"Text model not found: {paths['model_text_dir']}. Run reconstruct first."
+        )
+    filter_sparse_text_model(
+        paths["model_text_dir"],
+        paths["filtered_model_text_dir"],
+        config.get("filtering", {}),
+    )
+
+
 def cmd_analyze_graph(config: dict, paths: dict[str, Path]) -> None:
     database_path = ensure_database(paths)
     nodes, edges = build_image_graph(database_path, min_inliers=config["graph"]["min_inliers"])
@@ -141,12 +159,26 @@ def cmd_analyze_graph(config: dict, paths: dict[str, Path]) -> None:
 
 def cmd_detect_doppelgangers(config: dict, paths: dict[str, Path]) -> None:
     database_path = ensure_database(paths)
-    _, edges = build_image_graph(database_path, min_inliers=0)
+    doppel_config = dict(config["doppelgangers"])
+    matcher = str(doppel_config.get("matcher", "exhaustive")).lower()
+    graph_database_path = database_path
+
+    if matcher == "exhaustive":
+        paths["doppel_dir"].mkdir(parents=True, exist_ok=True)
+        shutil.copy2(database_path, paths["doppel_database_path"])
+        with sqlite3.connect(paths["doppel_database_path"]) as conn:
+            conn.execute("DELETE FROM matches")
+            conn.execute("DELETE FROM two_view_geometries")
+            conn.commit()
+        match_features(paths["doppel_database_path"], {**config["colmap"], "matcher": "exhaustive"})
+        graph_database_path = paths["doppel_database_path"]
+
+    _, edges = build_image_graph(graph_database_path, min_inliers=0)
     suspects = detect_doppelgangers(
         edges,
-        min_visual_matches=config["doppelgangers"]["min_visual_matches"],
-        max_inlier_ratio=config["doppelgangers"]["max_inlier_ratio"],
-        top_k=config["doppelgangers"]["top_k"],
+        min_visual_matches=doppel_config["min_visual_matches"],
+        max_inlier_ratio=doppel_config["max_inlier_ratio"],
+        top_k=doppel_config["top_k"],
     )
     write_doppelgangers(
         suspects,
@@ -162,14 +194,40 @@ def _prepare_subset_run(source_images: list[Path], destination_dir: Path, subset
     copied: list[Path] = []
     for source in subset:
         destination = destination_dir / source.name
-        if destination.exists():
+        if destination.exists() or destination.is_symlink():
             destination.unlink()
         try:
-            destination.symlink_to(source.resolve())
+            relative_target = os.path.relpath(source.resolve(), destination_dir.resolve())
+            destination.symlink_to(relative_target)
         except OSError:
             shutil.copy2(source, destination)
         copied.append(destination)
     return copied
+
+
+def _metrics_has_run_id(metrics_path: Path, run_id: str) -> bool:
+    if not metrics_path.exists():
+        return False
+    rows = load_metrics(metrics_path)
+    return any(row.get("run_id") == run_id for row in rows)
+
+
+def _record_full_metrics_if_needed(paths: dict[str, Path], object_id: str, num_images: int) -> None:
+    if not paths["model_text_dir"].exists():
+        return
+    metrics_path = paths["metrics_dir"] / "metrics.csv"
+    if _metrics_has_run_id(metrics_path, "full"):
+        return
+    metrics = collect_reconstruction_metrics(paths["model_text_dir"], num_images)
+    append_metrics_row(
+        metrics_path,
+        {
+            "object_id": object_id,
+            "run_id": "full",
+            "num_images": num_images,
+            **metrics,
+        },
+    )
 
 
 def cmd_run_ablation(config: dict, paths: dict[str, Path], object_id: str, seed: int) -> None:
@@ -177,9 +235,15 @@ def cmd_run_ablation(config: dict, paths: dict[str, Path], object_id: str, seed:
     subset_sizes = sorted(set(config["ablation"]["subset_sizes"] + [len(all_images)]))
     runs_per_size = int(config["ablation"]["runs_per_size"])
     metrics_path = paths["metrics_dir"] / "metrics.csv"
+    full_model_exists = paths["model_text_dir"].exists()
+
+    if full_model_exists:
+        _record_full_metrics_if_needed(paths, object_id, len(all_images))
 
     for subset_size in subset_sizes:
         if subset_size > len(all_images) or subset_size < 2:
+            continue
+        if subset_size == len(all_images) and full_model_exists:
             continue
         num_runs = 1 if subset_size == len(all_images) else runs_per_size
         for run_index in range(num_runs):
@@ -241,6 +305,8 @@ def main() -> int:
             cmd_extract_match(config, paths)
         elif args.command == "reconstruct":
             cmd_reconstruct(config, paths, args.object_id)
+        elif args.command == "clean-model":
+            cmd_clean_model(config, paths)
         elif args.command == "analyze-graph":
             cmd_analyze_graph(config, paths)
         elif args.command == "detect-doppelgangers":

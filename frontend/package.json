@@ -1,0 +1,14 @@
+{
+  "name": "sfm-viewer-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "preview": "nuxt preview"
+  },
+  "dependencies": {
+    "nuxt": "^3.17.5",
+    "three": "^0.176.0"
+  }
+}

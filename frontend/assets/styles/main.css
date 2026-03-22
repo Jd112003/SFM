@@ -1,0 +1,36 @@
+:root {
+  color-scheme: light;
+  --bg: #f4efe6;
+  --panel: rgba(255, 251, 244, 0.88);
+  --line: #d8cdbd;
+  --text: #1f1a17;
+  --muted: #6d6258;
+  --accent: #a5532d;
+  --accent-2: #2b6f77;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#__nuxt {
+  margin: 0;
+  min-height: 100%;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(165, 83, 45, 0.14), transparent 32%),
+    radial-gradient(circle at right 20%, rgba(43, 111, 119, 0.12), transparent 28%),
+    linear-gradient(180deg, #faf6ef 0%, var(--bg) 100%);
+  color: var(--text);
+}
+
+a {
+  color: inherit;
+}
+
+button,
+select {
+  font: inherit;
+}

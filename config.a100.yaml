@@ -21,9 +21,24 @@ graph:
   min_inlier_ratio: 0.15
 
 doppelgangers:
+  matcher: exhaustive
   min_visual_matches: 120
-  max_inlier_ratio: 0.25
+  max_inlier_ratio: 0.85
   top_k: 20
 
 report:
   include_success_plot: true
+
+filtering:
+  min_track_length: 3
+  reproj_error_quantile: 0.9
+  camera_distance_quantile: 0.92
+  remove_dominant_plane: true
+  robust_bbox_low_quantile: 5
+  robust_bbox_high_quantile: 95
+  plane_distance_ratio: 0.008
+  plane_ransac_iterations: 250
+  min_plane_inliers: 500
+  min_plane_inlier_ratio: 0.08
+  voxel_size_ratio: 0.01
+  min_component_size: 50

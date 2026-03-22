@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
 
 CONFIG_PATH="${CONFIG_PATH:-config.a100.yaml}"
-OBJECT_ID="${OBJECT_ID:-leon}"
+OBJECT_ID="${OBJECT_ID:-buda}"
 SERVICE_NAME="${SERVICE_NAME:-sfm-gpu}"
 export SFM_UID="${SFM_UID:-$(id -u)}"
 export SFM_GID="${SFM_GID:-$(id -g)}"

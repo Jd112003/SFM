@@ -44,3 +44,16 @@ services:
       NVIDIA_VISIBLE_DEVICES: "all"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
     gpus: all
+
+  viewer:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: sfm-viewer:latest
+    ports:
+      - "3010:3000"
+    environment:
+      SFM_OUTPUTS_ROOT: /workspace-data/outputs
+    volumes:
+      - .:/workspace-data:ro
+    init: true

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import sqlite3
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -417,9 +418,10 @@ def create_doppelganger_gallery(
     output_path: Path,
 ) -> None:
     cards = []
+    output_dir = output_path.parent
     for item in suspects:
-        image_a = (images_dir / item.image_a).as_posix()
-        image_b = (images_dir / item.image_b).as_posix()
+        image_a = os.path.relpath(images_dir / item.image_a, output_dir).replace("\\", "/")
+        image_b = os.path.relpath(images_dir / item.image_b, output_dir).replace("\\", "/")
         cards.append(
             f"""
             <article class="pair">
@@ -509,6 +511,301 @@ def collect_reconstruction_metrics(model_dir: Path, num_input_images: int) -> di
         "avg_track_length": avg_track_length,
         "registration_ratio": (registered_images / num_input_images) if num_input_images else 0.0,
     }
+
+
+def _parse_points3d_records(points3d_path: Path) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    if not points3d_path.exists():
+        return records
+    with points3d_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            parts = stripped.split()
+            if len(parts) < 8:
+                continue
+            track = [(int(parts[i]), int(parts[i + 1])) for i in range(8, len(parts), 2)]
+            records.append(
+                {
+                    "point3d_id": int(parts[0]),
+                    "xyz": np.array([float(parts[1]), float(parts[2]), float(parts[3])], dtype=float),
+                    "rgb": (int(parts[4]), int(parts[5]), int(parts[6])),
+                    "error": float(parts[7]),
+                    "track": track,
+                }
+            )
+    return records
+
+
+def _quaternion_to_rotation_matrix(qvec: np.ndarray) -> np.ndarray:
+    qw, qx, qy, qz = qvec
+    return np.array(
+        [
+            [1.0 - 2.0 * (qy * qy + qz * qz), 2.0 * (qx * qy - qz * qw), 2.0 * (qx * qz + qy * qw)],
+            [2.0 * (qx * qy + qz * qw), 1.0 - 2.0 * (qx * qx + qz * qz), 2.0 * (qy * qz - qx * qw)],
+            [2.0 * (qx * qz - qy * qw), 2.0 * (qy * qz + qx * qw), 1.0 - 2.0 * (qx * qx + qy * qy)],
+        ],
+        dtype=float,
+    )
+
+
+def _parse_image_records(images_txt_path: Path) -> tuple[list[str], list[dict[str, object]], np.ndarray]:
+    header_lines: list[str] = []
+    records: list[dict[str, object]] = []
+    camera_centers: list[np.ndarray] = []
+    if not images_txt_path.exists():
+        return header_lines, records, np.zeros((0, 3), dtype=float)
+
+    with images_txt_path.open("r", encoding="utf-8") as handle:
+        raw_lines = handle.readlines()
+
+    index = 0
+    while index < len(raw_lines):
+        first_line = raw_lines[index].rstrip("\n")
+        stripped = first_line.strip()
+        if not stripped or stripped.startswith("#"):
+            header_lines.append(first_line)
+            index += 1
+            continue
+        if index + 1 >= len(raw_lines):
+            break
+        second_line = raw_lines[index + 1].rstrip("\n")
+        parts = stripped.split()
+        if len(parts) < 10:
+            index += 1
+            continue
+
+        qvec = np.array([float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])], dtype=float)
+        tvec = np.array([float(parts[5]), float(parts[6]), float(parts[7])], dtype=float)
+        camera_center = -_quaternion_to_rotation_matrix(qvec).T @ tvec
+        camera_centers.append(camera_center)
+        records.append(
+            {
+                "first_parts": parts,
+                "second_line": second_line,
+            }
+        )
+        index += 2
+
+    return header_lines, records, np.vstack(camera_centers) if camera_centers else np.zeros((0, 3), dtype=float)
+
+
+def _dominant_plane_mask(points: np.ndarray, distance_threshold: float, iterations: int) -> np.ndarray:
+    if len(points) < 3:
+        return np.zeros(len(points), dtype=bool)
+    rng = np.random.default_rng(7)
+    best_mask = np.zeros(len(points), dtype=bool)
+    best_inliers = 0
+    for _ in range(iterations):
+        sample_ids = rng.choice(len(points), size=3, replace=False)
+        p1, p2, p3 = points[sample_ids]
+        normal = np.cross(p2 - p1, p3 - p1)
+        norm = np.linalg.norm(normal)
+        if norm < 1e-12:
+            continue
+        normal = normal / norm
+        distances = np.abs((points - p1) @ normal)
+        mask = distances <= distance_threshold
+        inliers = int(mask.sum())
+        if inliers > best_inliers:
+            best_mask = mask
+            best_inliers = inliers
+    return best_mask
+
+
+def _voxel_component_labels(points: np.ndarray, voxel_size: float) -> np.ndarray:
+    if len(points) == 0:
+        return np.zeros(0, dtype=int)
+    origin = points.min(axis=0)
+    voxels = np.floor((points - origin) / max(voxel_size, 1e-9)).astype(int)
+    voxel_to_points: dict[tuple[int, int, int], list[int]] = {}
+    for point_index, voxel in enumerate(voxels):
+        key = (int(voxel[0]), int(voxel[1]), int(voxel[2]))
+        voxel_to_points.setdefault(key, []).append(point_index)
+
+    labels = np.full(len(points), -1, dtype=int)
+    component_id = 0
+    for voxel in voxel_to_points:
+        seed_indices = voxel_to_points[voxel]
+        if labels[seed_indices[0]] != -1:
+            continue
+        stack = [voxel]
+        visited_voxels: set[tuple[int, int, int]] = set()
+        component_points: list[int] = []
+        while stack:
+            current = stack.pop()
+            if current in visited_voxels:
+                continue
+            visited_voxels.add(current)
+            component_points.extend(voxel_to_points.get(current, []))
+            cx, cy, cz = current
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        neighbor = (cx + dx, cy + dy, cz + dz)
+                        if neighbor in voxel_to_points and neighbor not in visited_voxels:
+                            stack.append(neighbor)
+        labels[component_points] = component_id
+        component_id += 1
+    return labels
+
+
+def filter_sparse_text_model(input_dir: Path, output_dir: Path, config: dict | None = None) -> dict[str, float | int]:
+    config = config or {}
+    points_path = input_dir / "points3D.txt"
+    images_path = input_dir / "images.txt"
+    cameras_path = input_dir / "cameras.txt"
+    frames_path = input_dir / "frames.txt"
+    rigs_path = input_dir / "rigs.txt"
+
+    records = _parse_points3d_records(points_path)
+    if not records:
+        raise FileNotFoundError(f"No 3D points found in {points_path}")
+
+    _, image_records, camera_centers = _parse_image_records(images_path)
+    points = np.vstack([record["xyz"] for record in records])
+    errors = np.array([float(record["error"]) for record in records], dtype=float)
+    track_lengths = np.array([len(record["track"]) for record in records], dtype=int)
+
+    min_track_length = int(config.get("min_track_length", 3))
+    error_quantile = float(config.get("reproj_error_quantile", 0.9))
+    max_reproj_error = float(config.get("max_reproj_error", np.quantile(errors, error_quantile)))
+    keep_mask = (track_lengths >= min_track_length) & (errors <= max_reproj_error)
+
+    working_points = points[keep_mask]
+    working_records = [record for record, keep in zip(records, keep_mask, strict=True) if keep]
+
+    if len(working_points) == 0:
+        raise RuntimeError("Filtering removed all points before geometric cleanup.")
+
+    if len(camera_centers) > 0:
+        camera_center = np.median(camera_centers, axis=0)
+        camera_radius = float(np.median(np.linalg.norm(camera_centers - camera_center, axis=1))) or 1.0
+        camera_distance_quantile = float(config.get("camera_distance_quantile", 0.92))
+        point_distances = np.linalg.norm(working_points - camera_center, axis=1)
+        camera_distance_threshold = float(np.quantile(point_distances, camera_distance_quantile))
+        radial_mask = point_distances <= camera_distance_threshold
+        working_points = working_points[radial_mask]
+        working_records = [record for record, keep in zip(working_records, radial_mask, strict=True) if keep]
+    else:
+        camera_center = np.median(working_points, axis=0)
+        camera_radius = 1.0
+
+    plane_ratio = float(config.get("plane_distance_ratio", 0.01))
+    robust_low = float(config.get("robust_bbox_low_quantile", 5.0))
+    robust_high = float(config.get("robust_bbox_high_quantile", 95.0))
+    low_bounds = np.percentile(working_points, robust_low, axis=0)
+    high_bounds = np.percentile(working_points, robust_high, axis=0)
+    diag = float(np.linalg.norm(high_bounds - low_bounds)) or 1.0
+    plane_threshold = float(config.get("plane_distance_threshold", diag * plane_ratio))
+    plane_iterations = int(config.get("plane_ransac_iterations", 250))
+    min_plane_inliers = int(config.get("min_plane_inliers", 500))
+    plane_inlier_ratio = float(config.get("min_plane_inlier_ratio", 0.08))
+    if bool(config.get("remove_dominant_plane", True)):
+        plane_mask = _dominant_plane_mask(working_points, plane_threshold, plane_iterations)
+        if int(plane_mask.sum()) >= min_plane_inliers and float(plane_mask.mean()) >= plane_inlier_ratio:
+            working_points = working_points[~plane_mask]
+            working_records = [record for record, is_plane in zip(working_records, plane_mask, strict=True) if not is_plane]
+
+    if len(working_points) == 0:
+        raise RuntimeError("Filtering removed all points after plane cleanup.")
+
+    voxel_ratio = float(config.get("voxel_size_ratio", 0.01))
+    voxel_size = float(config.get("voxel_size", diag * voxel_ratio))
+    labels = _voxel_component_labels(working_points, voxel_size)
+    unique_labels = sorted({int(label) for label in labels if label >= 0})
+    if not unique_labels:
+        raise RuntimeError("Unable to identify connected components in filtered cloud.")
+
+    min_component_size = int(config.get("min_component_size", 50))
+    component_scores: list[tuple[float, int]] = []
+    for label in unique_labels:
+        component_points = working_points[labels == label]
+        size = len(component_points)
+        if size < min_component_size:
+            continue
+        centroid = component_points.mean(axis=0)
+        distance = float(np.linalg.norm(centroid - camera_center))
+        bbox = component_points.max(axis=0) - component_points.min(axis=0)
+        density = size / max(float(np.prod(np.maximum(bbox, 1e-3))), 1e-6)
+        score = (
+            math.log1p(size)
+            + 1.2 * math.log1p(density)
+            - 0.8 * (distance / max(camera_radius, 1e-6))
+            - 0.08 * float(np.linalg.norm(bbox))
+        )
+        component_scores.append((score, label))
+    if not component_scores:
+        raise RuntimeError("No component survived the minimum-size threshold.")
+    component_scores.sort(reverse=True)
+    selected_label = component_scores[0][1]
+
+    selected_points = working_points[labels == selected_label]
+    selected_records = [record for record, label in zip(working_records, labels, strict=True) if int(label) == selected_label]
+    kept_point_ids = {int(record["point3d_id"]) for record in selected_records}
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for source_path in (cameras_path, frames_path, rigs_path):
+        if source_path.exists():
+            (output_dir / source_path.name).write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    filtered_points_path = output_dir / "points3D.txt"
+    with filtered_points_path.open("w", encoding="utf-8") as handle:
+        handle.write("# Filtered COLMAP 3D points\n")
+        handle.write(f"# Number of points: {len(selected_records)}\n")
+        for record in selected_records:
+            x, y, z = record["xyz"]
+            r, g, b = record["rgb"]
+            track = " ".join(f"{image_id} {point2d_id}" for image_id, point2d_id in record["track"])
+            if track:
+                handle.write(
+                    f"{record['point3d_id']} {x:.17g} {y:.17g} {z:.17g} {r} {g} {b} {record['error']:.17g} {track}\n"
+                )
+            else:
+                handle.write(f"{record['point3d_id']} {x:.17g} {y:.17g} {z:.17g} {r} {g} {b} {record['error']:.17g}\n")
+
+    filtered_images_path = output_dir / "images.txt"
+    with filtered_images_path.open("w", encoding="utf-8") as handle:
+        for line in _preserve_header_lines(images_path):
+            handle.write(f"{line}\n")
+        if image_records:
+            handle.write("\n")
+        for record in image_records:
+            handle.write(" ".join(record["first_parts"]) + "\n")
+            second_parts = str(record["second_line"]).split()
+            filtered_triplets: list[str] = []
+            for i in range(0, len(second_parts), 3):
+                if i + 2 >= len(second_parts):
+                    break
+                x = second_parts[i]
+                y = second_parts[i + 1]
+                point3d_id = int(second_parts[i + 2])
+                filtered_id = point3d_id if point3d_id in kept_point_ids else -1
+                filtered_triplets.extend([x, y, str(filtered_id)])
+            handle.write(" ".join(filtered_triplets) + "\n")
+
+    return {
+        "input_points": len(records),
+        "quality_filtered_points": len(working_records),
+        "output_points": len(selected_records),
+        "components_found": len(unique_labels),
+        "selected_component": int(selected_label),
+    }
+
+
+def _preserve_header_lines(images_txt_path: Path) -> list[str]:
+    lines: list[str] = []
+    if not images_txt_path.exists():
+        return lines
+    with images_txt_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                lines.append(line.rstrip("\n"))
+                continue
+            break
+    return lines
 
 
 def append_metrics_row(csv_path: Path, row: dict[str, object]) -> None:
