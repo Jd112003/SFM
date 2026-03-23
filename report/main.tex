@@ -13,6 +13,7 @@
 \usepackage[caption=false,font=footnotesize]{subfig}
 \usepackage{hyperref}
 \usepackage{array}
+\usepackage{placeins}
 \graphicspath{{figs/}}
 \hbadness=10000
 \vbadness=10000
@@ -70,13 +71,176 @@ El pipeline empleado sigue la metodolog\'ia cl\'asica de SfM:
 
 COLMAP implementa este flujo con detectores y descriptores robustos, emparejamiento geom\'etrico y un mapeador incremental ampliamente usado en investigaci\'on y aplicaciones reales~\cite{b2,b3}. En este proyecto, COLMAP se us\'o como motor de reconstrucci\'on, mientras que el c\'odigo propio se encarg\'o de la orquestaci\'on, an\'alisis posterior y visualizaci\'on.
 
-\subsection{Grafo de vistas}
+\subsection{Modelo de c\'amara y error de reproyecci\'on}
+
+Sea \(X_j \in \mathbb{R}^3\) un punto de la escena y sea la c\'amara \(i\) descrita por su matriz intr\'inseca \(K_i\), su rotaci\'on \(R_i \in SO(3)\) y su traslaci\'on \(t_i \in \mathbb{R}^3\). La proyecci\'on ideal sobre el plano de imagen viene dada por
+\begin{equation}
+\tilde{x}_{ij} \sim K_i [R_i \mid t_i]
+\begin{bmatrix}
+X_j \\ 1
+\end{bmatrix},
+\end{equation}
+donde \(\tilde{x}_{ij}\) est\'a en coordenadas homog\'eneas. La proyecci\'on euclidiana se obtiene mediante la funci\'on \(\pi(\cdot)\), que divide por la tercera coordenada homog\'enea. Entonces, si \(x_{ij}\) es la observaci\'on real del punto \(j\) en la imagen \(i\), el error de reproyecci\'on es
+\begin{equation}
+e_{ij} =
+\left\|
+x_{ij} - \pi\!\left(
+K_i [R_i \mid t_i]
+\begin{bmatrix}
+X_j \\ 1
+\end{bmatrix}
+\right)
+\right\|_2.
+\end{equation}
+
+En el proyecto se us\'o el modelo intr\'inseco \texttt{SIMPLE\_RADIAL} de COLMAP. Si \((x_u,y_u)\) son coordenadas normalizadas no distorsionadas, \(r^2 = x_u^2 + y_u^2\) y \(k_1\) es el coeficiente radial, entonces la correcci\'on se modela como
+\begin{equation}
+\begin{bmatrix}
+x_d \\ y_d
+\end{bmatrix}
+=
+\left(1 + k_1 r^2\right)
+\begin{bmatrix}
+x_u \\ y_u
+\end{bmatrix},
+\end{equation}
+y la conversi\'on a p\'ixeles queda dada por
+\begin{equation}
+u = f x_d + c_x,\qquad v = f y_d + c_y.
+\end{equation}
+Esto es importante porque el error de reproyecci\'on no se mide en un modelo pinhole idealizado, sino en uno que ya incorpora una correcci\'on radial de primer orden.
+
+Esta magnitud aparece repetidamente en el pipeline: COLMAP la usa para refinamiento geom\'etrico, el proyecto la resume como m\'etrica global de calidad, y la etapa de \texttt{clean-model} la utiliza para descartar puntos poco confiables.
+
+\subsection{SIFT, matching y verificaci\'on geom\'etrica}
+
+En la etapa \texttt{extract-match}, COLMAP calcula caracter\'isticas SIFT. El espacio de escala de una imagen \(I(x,y)\) se obtiene como
+\begin{equation}
+L(x,y,\sigma) = G(x,y,\sigma) * I(x,y),
+\end{equation}
+y la Diferencia de Gaussianas se aproxima por
+\begin{equation}
+D(x,y,\sigma) = L(x,y,k\sigma) - L(x,y,\sigma).
+\end{equation}
+Los extremos locales de \(D\) producen keypoints invariantes a escala, y sus vecindarios generan descriptores de 128 dimensiones~\cite{b4}. Una vez extra\'idos, el matcher secuencial o exhaustivo busca correspondencias entre im\'agenes vecinas o entre todos los pares, respectivamente.
+
+La verificaci\'on geom\'etrica de correspondencias entre dos vistas se apoya en la restricci\'on epipolar
+\begin{equation}
+x'_k{}^{T} F x_k = 0,
+\end{equation}
+donde \(F\) es la matriz fundamental y \(x_k, x'_k\) son puntos correspondientes en coordenadas homog\'eneas. Si las intr\'insecas son conocidas, esta relaci\'on puede reescribirse con la matriz esencial \(E\) como
+\begin{equation}
+E = K'^{T} F K,\qquad x_n'{}^{T} E x_n = 0,
+\end{equation}
+donde \(x_n\) y \(x_n'\) son coordenadas normalizadas. En la pr\'actica, COLMAP estima relaciones geom\'etricas robustas y almacena, para cada par, el n\'umero de matches crudos y el n\'umero de inliers aceptados en la tabla \texttt{two\_view\_geometries} de la base SQLite. Esa separaci\'on entre evidencia visual cruda e inliers geom\'etricos es justamente la base del grafo de vistas y de la detecci\'on de doppelgangers.
+
+\subsection{Reconstrucci\'on incremental y bundle adjustment}
+
+La etapa \texttt{reconstruct} ejecuta el mapeador incremental de COLMAP. El proceso inicia con un par semilla de vistas bien condicionadas, estima sus poses relativas, triangula puntos 3D iniciales y luego incorpora nuevas c\'amaras resolviendo sucesivamente problemas de \emph{Perspective-n-Point} y nuevas triangulaciones. Tras cada incorporaci\'on relevante, se ejecuta un \emph{bundle adjustment} para refinar poses y estructura minimizando el error total de reproyecci\'on:
+\begin{equation}
+\min_{\{R_i,t_i\}, \{X_j\}}
+\sum_{(i,j)\in\Omega}
+\rho\!\left(
+\left\|
+x_{ij} -
+\pi\!\left(
+K_i [R_i \mid t_i]
+\begin{bmatrix}
+X_j \\ 1
+\end{bmatrix}
+\right)
+\right\|_2^2
+\right),
+\end{equation}
+donde \(\Omega\) es el conjunto de observaciones v\'alidas y \(\rho(\cdot)\) representa una penalizaci\'on robusta. Esta optimizaci\'on es la raz\'on por la cual la calidad del grafo de vistas y de las correspondencias iniciales impacta directamente la reconstrucci\'on final.
+
+La triangulaci\'on de un punto tambi\'en puede verse como la b\'usqueda de \(\tilde{X}\) tal que, para cada vista \(i\) con matriz de proyecci\'on \(P_i\),
+\begin{equation}
+x_i \times (P_i \tilde{X}) = 0.
+\end{equation}
+Apilando dos o m\'as vistas se obtiene un sistema lineal \(A\tilde{X}=0\), cuya soluci\'on se estima por SVD antes del refinamiento no lineal. De manera an\'aloga, cuando una nueva c\'amara entra al modelo, el problema PnP consiste en encontrar \((R,t)\) que satisfagan
+\begin{equation}
+x_j \sim K [R \mid t]
+\begin{bmatrix}
+X_j \\ 1
+\end{bmatrix}
+\end{equation}
+para un conjunto de puntos 3D ya triangulados. Estas dos subrutinas, triangulaci\'on y PnP, son las que permiten alternar entre crecimiento de estructura y crecimiento del conjunto de poses registradas.
+
+\subsection{Filtrado geom\'etrico del modelo disperso}
+
+Una de las contribuciones m\'as importantes del pipeline propio es \texttt{clean-model}. Esta etapa no se limita a ``borrar ruido'' visualmente, sino que aplica una serie de filtros geom\'etricos y estad\'isticos sobre el modelo textual exportado por COLMAP:
+\begin{enumerate}
+  \item \textbf{filtro de calidad}: cada punto \(X_k\) tiene error de reproyecci\'on \(\varepsilon_k\) y longitud de \emph{track} \(t_k\). El punto se conserva solo si
+  \begin{equation}
+  t_k \ge t_{\min}, \qquad \varepsilon_k \le \tau_{\varepsilon},
+  \end{equation}
+  con \(t_{\min}=3\) por defecto y \(\tau_{\varepsilon}\) tomado como el percentil 90 del error si no se fija un umbral manual.
+
+  \item \textbf{filtro radial respecto a las c\'amaras}: si \(C_i\) son los centros de c\'amara, se define un centro robusto
+  \begin{equation}
+  C_{\text{med}} = \mathrm{median}\left(\{C_i\}\right),
+  \end{equation}
+  y se eliminan puntos demasiado alejados usando un umbral radial cuant\'ilico:
+  \begin{equation}
+  \|X_k - C_{\text{med}}\|_2 \le \tau_r,
+  \end{equation}
+  donde \(\tau_r\) corresponde al percentil 92 de las distancias de los puntos a \(C_{\text{med}}\).
+
+  \item \textbf{remoci\'on de plano dominante con RANSAC}: se calcula una caja robusta del punto filtrado usando percentiles 5 y 95, y a partir de su diagonal \(d\) se fija un umbral de plano \(\tau_p = 0.01d\). En cada iteraci\'on de RANSAC se muestrean tres puntos \(p_1,p_2,p_3\), se estima una normal
+  \begin{equation}
+  n = \frac{(p_2-p_1)\times(p_3-p_1)}{\|(p_2-p_1)\times(p_3-p_1)\|_2},
+  \end{equation}
+  y se considera inlier todo punto \(X_k\) tal que
+  \begin{equation}
+  |(X_k-p_1)^T n| \le \tau_p.
+  \end{equation}
+  Si el plano dominante tiene al menos 500 inliers y cubre al menos el 8\% de la nube activa, se elimina. Esto es particularmente \'util cuando el objeto est\'a apoyado sobre un suelo o pedestal dominante.
+
+  \item \textbf{componentes conectados por voxelizaci\'on}: los puntos restantes se discretizan con
+  \begin{equation}
+  v_k = \left\lfloor \frac{X_k - o}{s} \right\rfloor,
+  \end{equation}
+  donde \(o\) es el origen de la nube y \(s=0.01d\) por defecto. Luego se buscan componentes conectados en vecindad 26. Esto permite separar el objeto principal de fragmentos flotantes o basura residual.
+
+  \item \textbf{selecci\'on del componente principal}: para cada componente \(c\) se calcula un puntaje que combina tama\~no, densidad, proximidad al conjunto de c\'amaras y extensi\'on espacial:
+  \begin{equation}
+  S(c) =
+  \log(1+|c|)
+  + 1.2 \log(1+\delta_c)
+  - 0.8 \frac{\| \mu_c - C_{\text{med}} \|_2}{r_c}
+  - 0.08 \|\mathrm{bbox}_c\|_2,
+  \end{equation}
+  donde \(|c|\) es el n\'umero de puntos del componente, \(\delta_c\) su densidad, \(\mu_c\) su centroide, \(r_c\) el radio robusto de las c\'amaras y \(\mathrm{bbox}_c\) el tama\~no de su caja envolvente. El componente con mayor puntaje se selecciona como salida final.
+\end{enumerate}
+
+La salida de \texttt{clean-model} no solo genera un nuevo \texttt{points3D.txt}; tambi\'en reescribe \texttt{images.txt} para reemplazar por \(-1\) las observaciones 2D cuyas asociaciones 3D fueron descartadas. De esta manera, el modelo filtrado conserva consistencia interna.
+
+Desde la implementaci\'on concreta, los par\'ametros por defecto del filtrado fueron \(t_{\min}=3\), percentil de error \(0.9\), percentil radial \(0.92\), 250 iteraciones de RANSAC para el plano dominante, m\'inimo de 500 inliers de plano, raz\'on m\'inima de soporte del \(8\%\), y un tama\~no de voxel proporcional a \(0.01\) de la diagonal robusta de la nube. Esos valores fueron elegidos para privilegiar robustez antes que agresividad extrema: el objetivo del filtrado no es producir una segmentaci\'on perfecta, sino conservar un modelo disperso pedag\'ogicamente claro y geom\'etricamente consistente.
+
+\subsection{Grafo de vistas, doppelganger y ablaci\'on}
 
 Una forma \'util de entender una reconstrucci\'on SfM es verla como un grafo \(G=(V,E)\), donde cada nodo representa una imagen y cada arista representa una relaci\'on geom\'etricamente consistente entre dos vistas. Si \(m_{ij}\) es el n\'umero de matches visuales entre las im\'agenes \(i\) y \(j\), y \(g_{ij}\) es el n\'umero de inliers geom\'etricos tras verificaci\'on, entonces el cociente
 \begin{equation}
 r_{ij} = \frac{g_{ij}}{m_{ij}}
 \end{equation}
-se usa como una medida de consistencia geom\'etrica. En este trabajo, dicho valor se emplea para ponderar la visualizaci\'on del grafo y estudiar su conectividad.
+se usa como una medida de consistencia geom\'etrica. En este trabajo, dicho valor se emplea para ponderar el grafo y estudiar su conectividad. El peso usado por el an\'alisis es
+\begin{equation}
+w_{ij} = g_{ij}\max(r_{ij}, 10^{-6}),
+\end{equation}
+lo que privilegia pares con muchos inliers y alta consistencia relativa. A partir de ese grafo se calculan grados, componentes conectados y una disposici\'on visual tipo fuerza--resorte para exportaci\'on a DOT y HTML.
+
+El efecto \emph{doppelganger} se detecta reejecutando matching exhaustivo en una base auxiliar, de modo que no se altere la base principal de reconstrucci\'on. Para cada arista candidata se calcula la puntuaci\'on
+\begin{equation}
+s_{ij} = m_{ij}(1-r_{ij}),
+\end{equation}
+donde valores grandes indican muchos matches visuales pero acuerdo geom\'etrico relativamente d\'ebil. Los pares con mayor \(s_{ij}\) se reportan como sospechosos.
+
+La ablaci\'on incremental se construye repitiendo el pipeline sobre subconjuntos aleatorios sin reemplazo. Si \(N\) es el total de im\'agenes y \(n < N\) un tama\~no de subconjunto, se selecciona
+\begin{equation}
+\mathcal{I}_n \subset \mathcal{I}, \qquad |\mathcal{I}_n| = n,
+\end{equation}
+y se ejecuta nuevamente la cadena \texttt{extract-match} \(\rightarrow\) \texttt{reconstruct} \(\rightarrow\) recolecci\'on de m\'etricas. Al promediar por tama\~no de subconjunto se obtiene una curva de crecimiento de la reconstrucci\'on.
 
 \subsection{M\'etricas de reconstrucci\'on}
 
@@ -88,35 +252,44 @@ Para medir la calidad de una reconstrucci\'on se usaron cuatro indicadores princ
   \item \textbf{error medio de reproyecci\'on}: promedio del error reportado por COLMAP sobre cada punto 3D.
 \end{itemize}
 
-Adicionalmente se reporta la longitud media de \emph{track}, es decir, el promedio de vistas que observan un mismo punto 3D. Un \emph{track} largo suele indicar una reconstrucci\'on m\'as estable.
-
-\subsection{Efecto \emph{Doppelganger}}
-
-En el contexto de este proyecto, un par \emph{doppelganger} es un par de im\'agenes que parecen altamente compatibles a nivel visual, pero cuya consistencia geom\'etrica relativa no es suficientemente fuerte. Para detectarlos se ejecut\'o un emparejamiento exhaustivo auxiliar sobre una copia separada de la base de COLMAP y se definieron pares sospechosos como aquellos con:
-\begin{itemize}
-  \item un n\'umero alto de coincidencias visuales crudas;
-  \item una relaci\'on de inliers geom\'etricos menor o igual al umbral configurado.
-\end{itemize}
-
-En el pipeline se usa la puntuaci\'on
+De manera expl\'icita, si \(N_{\mathrm{in}}\) es el n\'umero de im\'agenes de entrada, \(N_{\mathrm{reg}}\) el n\'umero de im\'agenes registradas y \(P\) el conjunto de puntos 3D reconstruidos, entonces
 \begin{equation}
-s_{ij} = m_{ij}(1-r_{ij}),
+\rho_{\mathrm{reg}} = \frac{N_{\mathrm{reg}}}{N_{\mathrm{in}}}
 \end{equation}
-donde valores grandes indican muchos matches visuales pero acuerdo geom\'etrico imperfecto. Este mecanismo satisface la parte del enunciado que pide inducir y documentar el efecto \emph{doppelganger}.
+es la raz\'on de registro. Si cada punto \(X_k\) tiene error \(\varepsilon_k\), el error medio reportado es
+\begin{equation}
+\bar{\varepsilon} = \frac{1}{|P|}\sum_{k \in P}\varepsilon_k.
+\end{equation}
+Adicionalmente se reporta la longitud media de \emph{track}, es decir,
+\begin{equation}
+\bar{t} = \frac{1}{|P|}\sum_{k \in P} |T_k|,
+\end{equation}
+donde \(T_k\) es el conjunto de observaciones 2D asociadas al punto \(X_k\). Un \emph{track} largo suele indicar una reconstrucci\'on m\'as estable, porque el punto ha sido corroborado por m\'as vistas.
 
 \section{Implementaci\'on}\label{sec:impl}
 
 El proyecto se implement\'o en Python 3 y se organiz\'o como un paquete reutilizable llamado \texttt{sfm\_pipeline}. El backend de reconstrucci\'on es COLMAP y el resto de la l\'ogica se distribuye en comandos de l\'inea de comandos:
 
 \begin{itemize}
-  \item \texttt{prepare}: valida el dataset y genera el manifiesto de im\'agenes;
-  \item \texttt{extract-match}: ejecuta extracci\'on de SIFT y matching en la base de COLMAP;
-  \item \texttt{reconstruct}: corre el mapeador incremental y exporta el modelo textual;
-  \item \texttt{clean-model}: filtra la nube dispersa exportada para remover puntos espurios;
-  \item \texttt{analyze-graph}: construye el grafo de vistas y lo exporta a CSV, DOT y HTML;
-  \item \texttt{detect-doppelgangers}: identifica pares visualmente ambiguos;
-  \item \texttt{run-ablation}: ejecuta reconstrucciones sobre subconjuntos de tama\~no creciente;
-  \item \texttt{report}: exporta gr\'aficas de las m\'etricas incrementales.
+  \item \texttt{prepare}: inspecciona el directorio del objeto, ordena las im\'agenes compatibles por nombre y genera un manifiesto CSV con \emph{index}, \emph{filename} y \emph{relative\_path}. Aunque esta fase no realiza optimizaci\'on geom\'etrica, s\'i fija una correspondencia determinista entre la captura cruda y el resto del pipeline, lo que es importante para reproducibilidad y para el an\'alisis incremental posterior. Conceptualmente, esta etapa define una aplicaci\'on discreta \(\phi:\{1,\dots,N\}\rightarrow\mathcal{I}\) entre \'indices y archivos de imagen, que luego es reutilizada por el an\'alisis, el notebook y el reporte.
+
+  \item \texttt{extract-match}: invoca \texttt{colmap feature\_extractor} con el modelo de c\'amara configurado y luego ejecuta \texttt{sequential\_matcher} o \texttt{exhaustive\_matcher}. El resultado es una base SQLite que contiene im\'agenes, descriptores, matches crudos y geometr\'ias verificadas entre pares de vistas. En este proyecto, la configuraci\'on principal usa matching secuencial con solapamiento de 10 vecinos para la reconstrucci\'on y matching exhaustivo auxiliar para la b\'usqueda de doppelgangers. En otras palabras, la base no almacena solo ``qu\'e se parece a qu\'e'', sino tambi\'en cu\'anto de esa similitud sobrevive a una comprobaci\'on geom\'etrica robusta.
+
+  \item \texttt{reconstruct}: ejecuta \texttt{colmap mapper} con un umbral m\'inimo de 15 matches y selecciona el modelo disperso m\'as reciente generado por COLMAP. Luego usa \texttt{model\_converter} para exportarlo a formato de texto. Sobre ese modelo textual se calculan m\'etricas como im\'agenes registradas, n\'umero de puntos, error medio y mediano de reproyecci\'on, longitud media de track y raz\'on de registro. El resultado de la corrida completa se registra con \texttt{run\_id=full}, lo que permite compararlo directamente con las corridas de ablaci\'on.
+
+  \item \texttt{clean-model}: aplica la cadena de filtrado descrita en la secci\'on anterior. En orden, usa longitud de track y error de reproyecci\'on para descartar puntos de baja calidad, aplica un recorte radial con respecto al centro robusto de las c\'amaras, estima y elimina un plano dominante mediante RANSAC si su soporte es suficientemente grande, voxeliza la nube restante, extrae componentes conectados y selecciona el componente con mejor puntuaci\'on geom\'etrica. Finalmente reescribe \texttt{points3D.txt} e \texttt{images.txt} para producir un modelo filtrado internamente consistente. Adem\'as, devuelve estad\'isticas diagn\'osticas como \texttt{input\_points}, \texttt{quality\_filtered\_points}, \texttt{output\_points}, \texttt{components\_found} y \texttt{selected\_component}, que facilitan interpretar qu\'e tan agresivo fue el filtrado.
+
+  \item \texttt{analyze-graph}: lee la base de COLMAP, recupera el n\'umero de matches crudos desde la tabla \texttt{matches} y el n\'umero de inliers desde \texttt{two\_view\_geometries}, construye el grafo ponderado de vistas y calcula grados y componentes conectados. La detecci\'on de componentes se implementa con una b\'usqueda en profundidad sobre la adyacencia, mientras que la disposici\'on visual se aproxima con un esquema iterativo de fuerzas de repulsi\'on global y atracci\'on sobre aristas. El resultado se exporta a CSV, DOT y HTML.
+
+  \item \texttt{detect-doppelgangers}: crea una copia auxiliar de la base principal, borra en ella los resultados previos de matching y geometr\'ia, ejecuta \texttt{exhaustive\_matcher} y vuelve a construir el grafo completo. Sobre esas aristas calcula la puntuaci\'on \(s_{ij}=m_{ij}(1-r_{ij})\), filtra pares con suficiente volumen de matches visuales y relaci\'on geom\'etrica por debajo del umbral configurado, y exporta los mejores casos a CSV, JSON y una galer\'ia HTML. Esta separaci\'on entre base principal y base auxiliar evita contaminar la reconstrucci\'on usada para los resultados finales.
+
+  \item \texttt{run-ablation}: toma los tama\~nos de subconjunto configurados, muestrea im\'agenes sin reemplazo con una semilla fija, crea directorios temporales por corrida y rerun el proceso \texttt{feature\_extract} \(\rightarrow\) \texttt{match} \(\rightarrow\) \texttt{mapper}. Cuando es posible, usa enlaces simb\'olicos en lugar de copias f\'isicas para reducir costo de E/S. De este modo genera curvas de escalamiento de la reconstrucci\'on y permite observar la sensibilidad del objeto al n\'umero de vistas.
+
+  \item \texttt{report}: toma las filas acumuladas en \texttt{metrics.csv}, agrupa por n\'umero de im\'agenes y exporta curvas SVG de error medio, error mediano, raz\'on de registro, n\'umero de puntos y tasa de \'exito. Matem\'aticamente, esta etapa realiza una agregaci\'on por promedio sobre las corridas de cada tama\~no de subconjunto,
+  \begin{equation}
+  \bar{m}(n) = \frac{1}{R_n}\sum_{r=1}^{R_n} m_{n,r},
+  \end{equation}
+  donde \(m_{n,r}\) es la m\'etrica observada en la corrida \(r\) con \(n\) im\'agenes y \(R_n\) es el n\'umero de repeticiones para ese tama\~no. Para la tasa de \'exito, la m\'etrica agregada es la fracci\'on de corridas exitosas por tama\~no de subconjunto.
 \end{itemize}
 
 La estructura del proyecto se apoya tambi\'en en Docker, lo que permite ejecutar el mismo flujo tanto localmente como en GPU remota. Esta capa operativa es importante para reproducibilidad, pero para cumplir de mejor manera la consigna se agreg\'o un notebook de visualizaci\'on \texttt{notebooks/sfm\_visual\_workflow.ipynb}, que resume el pipeline por fases usando los artefactos ya generados.
@@ -132,14 +305,7 @@ Se trabaj\'o con tres conjuntos de im\'agenes creados por el equipo:
   \item \textbf{leon}: 729 im\'agenes.
 \end{itemize}
 
-Las capturas se realizaron rodeando cada objeto con solapamiento suficiente entre vistas consecutivas. En los tres casos se busc\'o un recorrido aproximadamente circular y distancia relativamente estable al objeto, aunque \emph{estatua} mostr\'o mayor dificultad por oclusiones, cambios de fondo y menor consistencia global.
-
-\begin{figure*}[htbp]
-  \centering
-  \includegraphics[width=0.95\textwidth]{dataset_samples.png}
-  \caption{Muestras representativas de los tres datasets empleados en el proyecto.}
-  \label{fig:dataset_samples}
-\end{figure*}
+Las capturas se realizaron rodeando cada objeto con solapamiento suficiente entre vistas consecutivas. En los tres casos se busc\'o un recorrido aproximadamente circular y distancia relativamente estable al objeto, aunque \emph{estatua} mostr\'o mayor dificultad por oclusiones, cambios de fondo y menor consistencia global. En la secci\'on de resultados se reorganiza la presentaci\'on por objeto para mostrar, de manera consecutiva, ejemplos de vistas, grafo de conectividad, crecimiento incremental, modelo filtrado y caso doppelganger.
 
 \subsection{Configuraci\'on del pipeline}
 
@@ -161,11 +327,12 @@ Para estudiar el crecimiento incremental de la reconstrucci\'on se ejecutaron ab
 
 La Tabla~\ref{tab:summary} resume el comportamiento final del pipeline completo. \emph{Buda} y \emph{leon} alcanzan registro total, mientras que \emph{estatua} presenta la escena m\'as desafiante con 730 de 763 im\'agenes registradas. Aun as\'i, su modelo final sigue siendo utilizable y denso.
 
-\begin{table*}[htbp]
+\begin{table}[!t]
 \caption{Resumen global de las reconstrucciones finales.}
 \label{tab:summary}
 \centering
-\small
+\scriptsize
+\resizebox{\columnwidth}{!}{
 \begin{tabular}{lrrrrrrrr}
 \toprule
 \textbf{Objeto} & \textbf{Imgs.} & \textbf{Reg.} & \textbf{Ratio} & \textbf{Pts. brutos} & \textbf{Pts. filtrados} & \textbf{Err. bruto} & \textbf{Err. filtrado} & \textbf{Track prom.} \\
@@ -175,116 +342,161 @@ La Tabla~\ref{tab:summary} resume el comportamiento final del pipeline completo.
 \textbf{Leon}    & 729 & 729 & 1.000 & 157\,284 & 99\,122 & 1.236 & 1.138 & 25.655 \\
 \bottomrule
 \end{tabular}
-\end{table*}
-
-El filtrado reduce significativamente la cantidad de puntos para privilegiar la estructura principal del objeto. La reducci\'on es del \(65.0\%\) en \emph{buda}, \(77.1\%\) en \emph{estatua} y \(37.0\%\) en \emph{leon}. En los tres casos el error medio de reproyecci\'on mejora ligeramente, lo que indica que la limpieza no solo simplifica la visualizaci\'on sino que tambi\'en elimina puntos menos confiables.
-
-\subsection{Conectividad entre vistas}
-
-La Fig.~\ref{fig:view_graphs} muestra los grafos de conectividad para las tres escenas. El comportamiento es coherente con el proceso de captura: aparecen estructuras densas y fuertemente conectadas por proximidad temporal. Las estad\'isticas agregadas del grafo son:
-\begin{itemize}
-  \item \textbf{buda}: 3842 aristas, \emph{inlier ratio} medio de 0.969 y 4368.6 inliers por arista en promedio;
-  \item \textbf{estatua}: 5358 aristas, \emph{inlier ratio} medio de 0.907 y 3630.0 inliers por arista;
-  \item \textbf{leon}: 5261 aristas, \emph{inlier ratio} medio de 0.956 y 4369.9 inliers por arista.
-\end{itemize}
-
-La menor consistencia geom\'etrica de \emph{estatua} es consistente con su menor tasa de registro final.
-
-\begin{figure*}[htbp]
-  \centering
-  \includegraphics[width=0.95\textwidth]{view_graphs.png}
-  \caption{Grafos de conectividad entre vistas. Los nodos representan im\'agenes y las aristas relaciones geom\'etricas v\'alidas.}
-  \label{fig:view_graphs}
-\end{figure*}
-
-\subsection{Reconstrucci\'on incremental}
-
-Una de las partes m\'as importantes de la consigna fue mostrar la reconstrucci\'on a medida que aumentan las vistas. La Fig.~\ref{fig:incremental} resume este comportamiento usando las corridas de ablaci\'on. Se observa una tendencia clara:
-\begin{itemize}
-  \item al aumentar el n\'umero de im\'agenes, crece el n\'umero de puntos 3D;
-  \item la raz\'on de registro mejora marcadamente en \emph{estatua} y \emph{leon};
-  \item el error de reproyecci\'on se mantiene relativamente estable, lo que sugiere que el incremento de densidad no sacrifica coherencia geom\'etrica.
-\end{itemize}
-
-La Tabla~\ref{tab:ablation} resume los promedios por tama\~no de subconjunto. \emph{Buda} es el objeto m\'as estable: incluso con 20 im\'agenes logra registro completo. \emph{Estatua} requiere un mayor n\'umero de vistas para estabilizarse, mientras que \emph{leon} muestra una mejora abrupta a partir de 80 im\'agenes.
-
-\begin{figure*}[htbp]
-  \centering
-  \includegraphics[width=0.92\textwidth]{incremental_metrics.png}
-  \caption{Evoluci\'on incremental de la reconstrucci\'on al aumentar el n\'umero de im\'agenes.}
-  \label{fig:incremental}
-\end{figure*}
-
-\begin{table*}[htbp]
-\caption{Resultados promedio de ablaci\'on por n\'umero de im\'agenes.}
-\label{tab:ablation}
-\centering
-\small
-\begin{tabular}{llrrrr}
-\toprule
-\textbf{Objeto} & \textbf{Imgs.} & \textbf{Corridas} & \textbf{Ratio de registro} & \textbf{Puntos 3D promedio} & \textbf{Error medio} \\
-\midrule
-\multirow{3}{*}{Buda}
-  & 20  & 3 & 1.0000 & 15\,505.0 & 1.0604 \\
-  & 40  & 3 & 1.0000 & 40\,288.3 & 1.1977 \\
-  & 80  & 3 & 1.0000 & 77\,507.7 & 1.2358 \\
-\midrule
-\multirow{5}{*}{Estatua}
-  & 20  & 3 & 0.3333 & 1\,825.0  & 0.9185 \\
-  & 40  & 3 & 0.6833 & 10\,054.7 & 1.0180 \\
-  & 80  & 3 & 0.6500 & 21\,330.7 & 1.0876 \\
-  & 160 & 3 & 0.8583 & 56\,884.3 & 1.1799 \\
-  & 320 & 3 & 0.8719 & 84\,140.7 & 1.2777 \\
-\midrule
-\multirow{5}{*}{Leon}
-  & 20  & 3 & 0.6500 & 7\,914.0   & 1.0792 \\
-  & 40  & 3 & 0.4750 & 13\,604.0  & 1.0098 \\
-  & 80  & 3 & 0.9042 & 52\,617.3  & 1.0446 \\
-  & 160 & 3 & 0.9708 & 84\,394.7  & 1.1299 \\
-  & 320 & 2 & 1.0000 & 113\,933.5 & 1.1720 \\
-\bottomrule
-\end{tabular}
-\end{table*}
-
-\subsection{Visualizaci\'on de modelos filtrados}
-
-La Fig.~\ref{fig:pointclouds} muestra las nubes dispersas filtradas. Aunque se trata todav\'ia de modelos dispersos, se distinguen claramente las formas principales de los tres objetos. \emph{Leon} presenta la nube m\'as estable y con mayor soporte multi-vista, lo cual tambi\'en se refleja en su longitud media de \emph{track} de 25.655.
-
-\begin{figure*}[htbp]
-  \centering
-  \includegraphics[width=0.95\textwidth]{filtered_pointclouds.png}
-  \caption{Modelos dispersos filtrados y centros de c\'amara estimados para los tres objetos.}
-  \label{fig:pointclouds}
-\end{figure*}
-
-\subsection{Efecto \emph{Doppelganger}}
-
-La consigna pidi\'o inducir deliberadamente el efecto \emph{doppelganger}. En este proyecto se cumpli\'o ejecutando una b\'usqueda exhaustiva auxiliar sobre cada dataset. Los 20 candidatos con mayor puntuaci\'on fueron almacenados por objeto.
-
-La Tabla~\ref{tab:doppel} resume el candidato principal en cada escena. \emph{Buda} muestra los casos m\'as fuertes, con m\'as de 2300 matches crudos y una relaci\'on geom\'etrica cercana a 0.84. Esto indica que las vistas son muy parecidas a nivel visual, pero no completamente equivalentes desde la geometr\'ia epipolar. \emph{Estatua} y \emph{leon} presentan el mismo fen\'omeno, aunque con menos matches.
-
-\begin{table}[htbp]
-\caption{Candidato principal de doppelganger por dataset.}
-\label{tab:doppel}
-\centering
-\small
-\begin{tabular}{p{1.0cm}p{1.3cm}p{1.0cm}p{0.8cm}p{0.8cm}}
-\toprule
-\textbf{Obj.} & \textbf{Par} & \textbf{Matches} & \textbf{Geom.} & \textbf{Score} \\
-\midrule
-Buda & 020-100 & 2563 & 0.833 & 428 \\
-Est. & 016-072 & 342  & 0.772 & 78 \\
-Leon & 024-026 & 191  & 0.764 & 45 \\
-\bottomrule
-\end{tabular}
+}
 \end{table}
 
-\begin{figure*}[htbp]
+El filtrado reduce significativamente la cantidad de puntos para privilegiar la estructura principal del objeto. La reducci\'on es del \(65.0\%\) en \emph{buda}, \(77.1\%\) en \emph{estatua} y \(37.0\%\) en \emph{leon}. En los tres casos el error medio de reproyecci\'on mejora ligeramente, lo que indica que la limpieza no solo simplifica la visualizaci\'on sino que tambi\'en elimina puntos menos confiables. A partir de este punto se presenta cada caso de estudio por separado para que el recorrido visual y el an\'alisis num\'erico permanezcan juntos y no se rompan por el comportamiento de los floats de dos columnas.
+
+\subsection{Buda}
+
+\emph{Buda} es el caso m\'as estable del proyecto y, al mismo tiempo, el mejor ejemplo de c\'omo una captura consistente simplifica el trabajo de SfM. El dataset contiene 521 im\'agenes y todas lograron registrarse. La reconstrucci\'on final produjo 188\,203 puntos 3D en bruto y 65\,825 tras el filtrado, con mejora del error medio de reproyecci\'on de 1.406 a 1.343. Tambi\'en presenta un grafo robusto de 3842 aristas, \emph{inlier ratio} medio de 0.969 y 4368.6 inliers por arista en promedio, valores que confirman un recorrido con alto solapamiento y muy poca ambig\"uedad geom\'etrica.
+
+\begin{figure}[!t]
   \centering
-  \includegraphics[width=0.95\textwidth]{doppelganger_examples.png}
-  \caption{Ejemplos de pares doppelganger detectados autom\'aticamente en los tres objetos.}
-  \label{fig:doppel}
-\end{figure*}
+  \includegraphics[width=\columnwidth,height=0.24\textheight,keepaspectratio]{buda_samples.png}
+  \caption{Muestras representativas del dataset \emph{buda}.}
+  \label{fig:buda_samples}
+\end{figure}
+
+Las vistas de la Fig.~\ref{fig:buda_samples} muestran un objeto compacto, bien centrado y capturado a distancia relativamente uniforme. Esta regularidad favorece la extracci\'on de caracter\'isticas y la verificaci\'on geom\'etrica. Adem\'as, el fondo de suelo granular aporta textura sin dominar completamente al objeto, lo que ayuda al registro inicial, aunque luego parte de esos puntos de fondo deben filtrarse.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=0.86\columnwidth,height=0.27\textheight,keepaspectratio]{buda_graph.png}
+  \caption{Grafo de conectividad entre vistas para \emph{buda}.}
+  \label{fig:buda_graph}
+\end{figure}
+
+El grafo de la Fig.~\ref{fig:buda_graph} presenta un n\'ucleo muy denso y pocas conexiones largas hacia nodos perif\'ericos. Eso sugiere que la mayor parte del recorrido forma una secuencia cerrada y consistente, con unos pocos fotogramas extremos o de transici\'on que se comportan como outliers suaves. En t\'erminos pr\'acticos, esto significa que el mapeador incremental tuvo suficiente redundancia desde etapas tempranas para propagar poses estables sin perder continuidad.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\columnwidth,height=0.18\textheight,keepaspectratio]{buda_incremental.png}
+  \caption{Reconstrucci\'on incremental para \emph{buda}.}
+  \label{fig:buda_incremental}
+\end{figure}
+
+La curva incremental de la Fig.~\ref{fig:buda_incremental} confirma esta intuici\'on. \emph{Buda} mantuvo raz\'on de registro 1.0 incluso con 20 im\'agenes. El n\'umero promedio de puntos 3D creci\'o de 15\,505 con 20 vistas a 40\,288.3 con 40 vistas y 77\,507.7 con 80 vistas, mientras el error medio se mantuvo entre 1.060 y 1.236. En otras palabras, la reconstrucci\'on escala en densidad sin sacrificar estabilidad: m\'as im\'agenes agregan evidencia geom\'etrica, pero el sistema ya estaba ``cerrado'' desde etapas tempranas.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=0.92\columnwidth,height=0.24\textheight,keepaspectratio]{buda_pointcloud.png}
+  \caption{Render tipo viewer del modelo disperso filtrado para \emph{buda}.}
+  \label{fig:buda_pointcloud}
+\end{figure}
+
+La Fig.~\ref{fig:buda_pointcloud} muestra un render tipo viewer del modelo filtrado, con fondo oscuro para aumentar el contraste de una nube que sigue conteniendo trazas del entorno. En esta vista se conserva la silueta principal del objeto, mientras desaparece gran parte del halo de puntos de fondo asociado al suelo y al entorno inmediato. El hecho de que el error mejore despu\'es del filtrado indica que los puntos removidos eran, en promedio, menos consistentes.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\columnwidth,height=0.17\textheight,keepaspectratio]{buda_doppelganger.png}
+  \caption{Par doppelganger representativo detectado en \emph{buda}.}
+  \label{fig:buda_doppel}
+\end{figure}
+
+El principal candidato doppelganger de \emph{buda} corresponde al par 020--100, con 2563 matches crudos, relaci\'on geom\'etrica 0.833 y puntuaci\'on de sospecha 428. Este es el caso m\'as fuerte de los tres datasets. La explicaci\'on visual es coherente con la escena: varias tomas cenitales o casi cenitales del buda generan configuraciones muy parecidas, de modo que los descriptores locales encuentran gran similitud aunque la posici\'on relativa de las c\'amaras no sea equivalente. Este caso muestra bien la diferencia entre \emph{parecido visual} y \emph{acuerdo geom\'etrico}.
+
+\FloatBarrier
+\subsection{Estatua}
+
+\emph{Estatua} es el caso m\'as desafiante del proyecto. Aunque el conjunto tiene 763 im\'agenes, solo 730 lograron registrarse, para una raz\'on final de 0.957. La nube en bruto contiene 122\,140 puntos y el filtrado la reduce a 27\,973, con error medio que baja de 1.351 a 1.330. Aunque el grafo posee 5358 aristas, su \emph{inlier ratio} medio de 0.907 es el m\'as bajo de los tres conjuntos y el promedio de inliers por arista cae a 3630.0, lo que sugiere mayor ambig\"uedad geom\'etrica y m\'as variaci\'on de fondo.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\columnwidth,height=0.24\textheight,keepaspectratio]{estatua_samples.png}
+  \caption{Muestras representativas del dataset \emph{estatua}.}
+  \label{fig:estatua_samples}
+\end{figure}
+
+La Fig.~\ref{fig:estatua_samples} deja ver una causa importante de esta dificultad. A diferencia de \emph{buda}, aqu\'i el objeto es alto, esbelto y est\'a inmerso en un entorno con \'arboles, senderos y arquitectura. Eso produce oclusiones parciales, cambios m\'as fuertes de fondo y menor dominancia visual del objeto en varias tomas. Como consecuencia, las correspondencias no siempre quedan concentradas en la estatua misma y parte de la energ\'ia del matching se dispersa en el contexto.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=0.86\columnwidth,height=0.27\textheight,keepaspectratio]{estatua_graph.png}
+  \caption{Grafo de conectividad entre vistas para \emph{estatua}.}
+  \label{fig:estatua_graph}
+\end{figure}
+
+El grafo de la Fig.~\ref{fig:estatua_graph} es informativo: sigue habiendo un cuerpo central denso, pero la estructura es menos compacta que en \emph{buda}. Esto sugiere que la continuidad del recorrido existe, pero no con el mismo nivel de redundancia local. En t\'erminos de SfM, eso vuelve m\'as sensible el registro a qu\'e subconjunto de im\'agenes se use y en qu\'e parte del recorrido se produzca el cierre geom\'etrico.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\columnwidth,height=0.18\textheight,keepaspectratio]{estatua_incremental.png}
+  \caption{Reconstrucci\'on incremental para \emph{estatua}.}
+  \label{fig:estatua_incremental}
+\end{figure}
+
+La reconstrucci\'on incremental refleja claramente esta dificultad. Con 20 im\'agenes la raz\'on promedio de registro fue solo 0.333 y el modelo apenas alcanz\'o 1\,825 puntos 3D. Al pasar a 40 y 80 im\'agenes, la raz\'on de registro subi\'o a 0.683 y 0.650, todav\'ia con variabilidad apreciable entre corridas. Reci\'en al llegar a 160 y 320 im\'agenes el sistema se estabiliza en 0.858 y 0.872, con 56\,884.3 y 84\,140.7 puntos 3D respectivamente. Esto indica que \emph{estatua} exige m\'as cobertura angular y m\'as redundancia para converger hacia una reconstrucci\'on robusta.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=0.92\columnwidth,height=0.24\textheight,keepaspectratio]{estatua_pointcloud.png}
+  \caption{Render tipo viewer del modelo disperso filtrado para \emph{estatua}.}
+  \label{fig:estatua_pointcloud}
+\end{figure}
+
+La Fig.~\ref{fig:estatua_pointcloud} muestra, en un encuadre similar al viewer del frontend, que el filtrado retiene la regi\'on correspondiente al cuerpo principal de la escultura, pero todav\'ia sobreviven trazas del entorno. Esto es consistente con la naturaleza del dataset: una escena m\'as contaminada por fondo produce m\'as puntos perif\'ericos que no siempre son f\'aciles de separar por completo sin eliminar geometr\'ia del objeto. Esta presentaci\'on permite distinguir con m\'as claridad el soporte de suelo y la estructura vertical residual alrededor de la estatua.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\columnwidth,height=0.17\textheight,keepaspectratio]{estatua_doppelganger.png}
+  \caption{Par doppelganger representativo detectado en \emph{estatua}.}
+  \label{fig:estatua_doppel}
+\end{figure}
+
+El principal doppelganger de \emph{estatua} corresponde al par 016--072, con 342 matches crudos, relaci\'on geom\'etrica 0.772 y puntuaci\'on 78. En este caso la ambig\"uedad se explica por vistas frontales similares de la escultura, pero con cambios suficientes de entorno para que el acuerdo geom\'etrico no sea perfecto. Este ejemplo ilustra bien que en escenas con fondo complejo la similitud visual puede estar influenciada tanto por el objeto como por partes del ambiente.
+
+\FloatBarrier
+\subsection{Leon}
+
+\emph{Leon} combina alta estabilidad global con una forma tridimensional muy marcada. Sus 729 im\'agenes se registraron por completo, generando 157\,284 puntos 3D en bruto y 99\,122 tras el filtrado. Adem\'as, obtuvo el menor error filtrado del proyecto, 1.138, y la mayor longitud media de \emph{track}, 25.655, lo que indica observaciones multivista particularmente consistentes. Su grafo tambi\'en es fuerte: 5261 aristas, \emph{inlier ratio} medio de 0.956 y 4369.9 inliers por arista en promedio.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\columnwidth,height=0.24\textheight,keepaspectratio]{leon_samples.png}
+  \caption{Muestras representativas del dataset \emph{leon}.}
+  \label{fig:leon_samples}
+\end{figure}
+
+Las vistas de la Fig.~\ref{fig:leon_samples} muestran un objeto con geometr\'ia m\'as saliente y textura fuerte en la melena, apoyado sobre un pedestal claro y rodeado de elementos arquitect\'onicos. Esta combinaci\'on es favorable: la estatua ofrece rasgos distintivos, mientras que el entorno aporta referencia geom\'etrica adicional sin eclipsar completamente al objeto.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=0.86\columnwidth,height=0.27\textheight,keepaspectratio]{leon_graph.png}
+  \caption{Grafo de conectividad entre vistas para \emph{leon}.}
+  \label{fig:leon_graph}
+\end{figure}
+
+El grafo de \emph{leon} se parece a una estructura casi circular con conectividad interna abundante, lo que sugiere un recorrido bien distribuido alrededor del objeto. A diferencia de \emph{estatua}, aqu\'i las conexiones perif\'ericas no degradan la cohesi\'on del conjunto. Esa organizaci\'on ayuda a explicar por qu\'e, una vez que se supera cierto n\'umero de im\'agenes, la reconstrucci\'on se vuelve extremadamente estable.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\columnwidth,height=0.18\textheight,keepaspectratio]{leon_incremental.png}
+  \caption{Reconstrucci\'on incremental para \emph{leon}.}
+  \label{fig:leon_incremental}
+\end{figure}
+
+La Fig.~\ref{fig:leon_incremental} muestra un comportamiento interesante. Con 20 y 40 im\'agenes la raz\'on promedio de registro es de 0.650 y 0.475, con 7\,914.0 y 13\,604.0 puntos 3D respectivamente. A partir de 80 im\'agenes, sin embargo, la raz\'on sube a 0.904 y el modelo alcanza 52\,617.3 puntos, para luego llegar a 0.971 con 160 y 1.0 con 320. Esto sugiere un umbral pr\'actico de cobertura visual: antes de 80 im\'agenes el circuito alrededor del le\'on todav\'ia no es lo suficientemente redundante, pero una vez superado ese punto el grafo ofrece soporte suficiente para estabilizar toda la reconstrucci\'on.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=0.92\columnwidth,height=0.24\textheight,keepaspectratio]{leon_pointcloud.png}
+  \caption{Render tipo viewer del modelo disperso filtrado para \emph{leon}.}
+  \label{fig:leon_pointcloud}
+\end{figure}
+
+El modelo filtrado de la Fig.~\ref{fig:leon_pointcloud} conserva mejor que los otros dos la morfolog\'ia principal del objeto. En esta vista tipo viewer se distinguen con claridad el volumen de la cabeza, la espalda y zonas del pedestal. La mejora de error de 1.236 a 1.138, junto con la alta longitud media de \emph{track}, sugiere que muchos puntos del modelo son observados de manera consistente por numerosas vistas.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\columnwidth,height=0.17\textheight,keepaspectratio]{leon_doppelganger.png}
+  \caption{Par doppelganger representativo detectado en \emph{leon}.}
+  \label{fig:leon_doppel}
+\end{figure}
+
+El principal candidato doppelganger en \emph{leon} es el par 024--026, con 191 matches crudos, relaci\'on geom\'etrica 0.764 y puntuaci\'on 45. Aunque menos extremo que en \emph{buda}, este caso sigue siendo \'util para ilustrar la diferencia entre similitud visual y consistencia geom\'etrica. En este objeto, el fen\'omeno aparece especialmente en vistas frontales muy parecidas, donde la postura sim\'etrica del le\'on y el pedestal inducen coincidencias fuertes entre descriptores.
+
+\FloatBarrier
 
 \section{Discusi\'on}\label{sec:discussion}
 

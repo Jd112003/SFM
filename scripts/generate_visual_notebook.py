@@ -51,31 +51,47 @@ Las fuentes visualizadas aqui son:
 """
         ),
         code_cell(
-            """from pathlib import Path
+            """import importlib
+import sys
+from pathlib import Path
+
+
+def find_repo_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / "sfm_pipeline").exists():
+            return candidate
+    raise FileNotFoundError("No se encontro la raiz del repositorio con la carpeta 'sfm_pipeline'.")
+
+
+REPO_ROOT = find_repo_root(Path.cwd().resolve())
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import matplotlib.pyplot as plt
 import pandas as pd
 from IPython.display import Markdown, display
 
-from sfm_pipeline.notebook_utils import (
-    OBJECT_IDS,
-    aggregate_metrics,
-    build_dataset_summary,
-    load_camera_centers,
-    load_doppelgangers_df,
-    load_graph,
-    load_metrics_df,
-    load_point_cloud,
-    make_contact_sheet,
-    make_pair_strip,
-    plot_image_graph,
-    plot_point_cloud,
-    resolve_repo_root,
-    sample_image_paths,
-)
+import sfm_pipeline.notebook_utils as notebook_utils
+
+notebook_utils = importlib.reload(notebook_utils)
+
+OBJECT_IDS = notebook_utils.OBJECT_IDS
+aggregate_metrics = notebook_utils.aggregate_metrics
+build_dataset_summary = notebook_utils.build_dataset_summary
+load_camera_centers = notebook_utils.load_camera_centers
+load_doppelgangers_df = notebook_utils.load_doppelgangers_df
+load_graph = notebook_utils.load_graph
+load_metrics_df = notebook_utils.load_metrics_df
+load_point_cloud = notebook_utils.load_point_cloud
+make_contact_sheet = notebook_utils.make_contact_sheet
+make_pair_strip = notebook_utils.make_pair_strip
+plot_image_graph = notebook_utils.plot_image_graph
+plot_point_cloud = notebook_utils.plot_point_cloud
+resolve_repo_root = notebook_utils.resolve_repo_root
+sample_image_paths = notebook_utils.sample_image_paths
 
 plt.style.use("seaborn-v0_8-whitegrid")
-ROOT = resolve_repo_root()
+ROOT = REPO_ROOT
 OBJECTS = list(OBJECT_IDS)
 ROOT
 """
@@ -305,7 +321,7 @@ La siguiente tabla sirve como guia para el informe final. Resume como este repo 
             "literal": "a",
             "que_pide": "Usar un set propio y maximizar calidad",
             "como_lo_cubre_el_repo": "Los tres datasets fueron reconstruidos con COLMAP y hay modelos filtrados para presentacion final.",
-            "evidencia": "datasets buda/estatua/leon + outputs/<objeto>/reconstruction/",
+            "evidencia": "datasets data/buda|estatua|leon + outputs/<objeto>/reconstruction/",
         },
         {
             "literal": "b",
@@ -335,7 +351,7 @@ La siguiente tabla sirve como guia para el informe final. Resume como este repo 
             "literal": "f",
             "que_pide": "Subir el dataset empleado",
             "como_lo_cubre_el_repo": "Los datasets estan versionados en carpetas separadas por objeto.",
-            "evidencia": "buda/, estatua/, leon/",
+            "evidencia": "data/buda/, data/estatua/, data/leon/",
         },
     ]
 )

@@ -4,14 +4,10 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-resume_logs/
 
 outputs/
-
-leon/
-estatua/
-buda/
 data/
+ops/logs/
 
 *.db
 *.sqlite

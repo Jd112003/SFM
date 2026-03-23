@@ -16,14 +16,22 @@ def resolve_repo_root(start: Path | None = None) -> Path:
     current = (start or Path.cwd()).resolve()
     candidates = [current, *current.parents]
     for candidate in candidates:
-        if (candidate / "outputs").exists() and any((candidate / object_id).exists() for object_id in OBJECT_IDS):
+        if (candidate / "sfm_pipeline").exists():
+            return candidate
+        has_root_objects = any((candidate / object_id).exists() for object_id in OBJECT_IDS)
+        has_data_objects = any((candidate / "data" / object_id).exists() for object_id in OBJECT_IDS)
+        if (candidate / "outputs").exists() and (has_root_objects or has_data_objects):
             return candidate
     raise FileNotFoundError("Could not resolve repository root from the current working directory.")
 
 
 def object_paths(root: Path, object_id: str) -> dict[str, Path]:
+    data_object_dir = root / "data" / object_id
+    if not data_object_dir.exists():
+        legacy_object_dir = root / object_id
+        data_object_dir = legacy_object_dir if legacy_object_dir.exists() else data_object_dir
     return {
-        "images_dir": root / object_id / "images",
+        "images_dir": data_object_dir / "images",
         "outputs_dir": root / "outputs" / object_id,
         "metrics_path": root / "outputs" / object_id / "metrics" / "metrics.csv",
         "database_path": root / "outputs" / object_id / "database.db",
@@ -132,6 +140,7 @@ def make_contact_sheet(
     sheet = Image.new("RGB", (cols * thumb_size[0], rows * thumb_size[1]), color=background)
     for index, image_path in enumerate(image_paths):
         with Image.open(image_path) as image:
+            image = ImageOps.exif_transpose(image)
             tile = ImageOps.fit(image.convert("RGB"), thumb_size, method=Image.Resampling.LANCZOS)
         x = (index % cols) * thumb_size[0]
         y = (index // cols) * thumb_size[1]
@@ -143,7 +152,7 @@ def load_graph(root: Path, object_id: str, min_inliers: int = 15):
     return build_image_graph(object_paths(root, object_id)["database_path"], min_inliers=min_inliers)
 
 
-def plot_image_graph(ax, nodes, edges, title: str, max_edges: int = 350) -> None:
+def plot_image_graph(ax, nodes, edges, title: str, max_edges: int = 220, label_nodes: bool = False) -> None:
     if not nodes:
         ax.set_title(title)
         ax.axis("off")
@@ -162,26 +171,29 @@ def plot_image_graph(ax, nodes, edges, title: str, max_edges: int = 350) -> None
         dtype=float,
     ) / 255.0
 
-    for edge in sorted(edges, key=lambda item: item.weight, reverse=True)[:max_edges]:
+    edge_subset = sorted(edges, key=lambda item: item.weight, reverse=True)[:max_edges]
+    for edge in sorted(edge_subset, key=lambda item: item.inlier_ratio):
         node_a = node_by_id[edge.image_id1]
         node_b = node_by_id[edge.image_id2]
+        tone = 0.25 + 0.45 * float(edge.inlier_ratio)
         ax.plot(
             [node_a.x, node_b.x],
             [node_a.y, node_b.y],
-            linewidth=max(0.4, edge.inlier_ratio * 3.0),
-            color="#6c665d",
-            alpha=min(0.85, 0.15 + edge.inlier_ratio * 0.7),
+            linewidth=0.25 + 1.05 * min(edge.inlier_ratio, 1.0),
+            color=(tone, tone * 0.95, tone * 0.82),
+            alpha=0.10 + 0.16 * min(edge.inlier_ratio, 1.0),
             zorder=1,
         )
 
     colors = [palette[node.component % len(palette)] for node in nodes]
-    sizes = [26 + min(node.degree, 20) * 6 for node in nodes]
+    sizes = [10 + min(node.degree, 18) * 1.7 for node in nodes]
     xs = [node.x for node in nodes]
     ys = [node.y for node in nodes]
-    ax.scatter(xs, ys, s=sizes, c=colors, edgecolors="#181818", linewidths=0.4, zorder=2)
+    ax.scatter(xs, ys, s=sizes, c=colors, edgecolors="#24323a", linewidths=0.25, alpha=0.9, zorder=2)
 
-    for node in sorted(nodes, key=lambda item: item.degree, reverse=True)[:6]:
-        ax.text(node.x, node.y, node.name.split(".")[0][-3:], fontsize=7, ha="center", va="center", zorder=3)
+    if label_nodes:
+        for node in sorted(nodes, key=lambda item: item.degree, reverse=True)[:4]:
+            ax.text(node.x, node.y, node.name.split(".")[0][-3:], fontsize=6, ha="center", va="center", zorder=3)
 
     ax.set_title(title)
     ax.set_xticks([])
@@ -295,26 +307,72 @@ def _set_axes_equal(ax) -> None:
     ax.set_zlim3d([centers[2] - radius, centers[2] + radius])
 
 
-def plot_point_cloud(ax, xyz: np.ndarray, rgb: np.ndarray, cameras: np.ndarray | None, title: str) -> None:
+def _set_axes_equal_from_points(
+    ax,
+    xyz: np.ndarray,
+    quantiles: tuple[float, float] | None = None,
+    margin_scale: float = 1.0,
+) -> None:
+    if len(xyz) == 0:
+        return
+    if quantiles is None:
+        mins = xyz.min(axis=0)
+        maxs = xyz.max(axis=0)
+    else:
+        low_q, high_q = quantiles
+        mins = np.percentile(xyz, low_q, axis=0)
+        maxs = np.percentile(xyz, high_q, axis=0)
+    centers = (mins + maxs) / 2.0
+    radius = 0.5 * max(float(np.max(maxs - mins)), 1e-6) * max(margin_scale, 1e-6)
+    ax.set_xlim3d([centers[0] - radius, centers[0] + radius])
+    ax.set_ylim3d([centers[1] - radius, centers[1] + radius])
+    ax.set_zlim3d([centers[2] - radius, centers[2] + radius])
+
+
+def plot_point_cloud(
+    ax,
+    xyz: np.ndarray,
+    rgb: np.ndarray,
+    cameras: np.ndarray | None,
+    title: str,
+    view: tuple[float, float] | None = None,
+    bounds_quantiles: tuple[float, float] | None = None,
+    bounds_margin_scale: float = 1.0,
+    show_axis_labels: bool = True,
+    show_ticks: bool = True,
+) -> None:
     if len(xyz) > 0:
-        ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], c=rgb, s=1.0, alpha=0.65, linewidths=0)
+        ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], c=rgb, s=1.8, alpha=0.85, linewidths=0)
     if cameras is not None and len(cameras) > 0:
         ax.scatter(
             cameras[:, 0],
             cameras[:, 1],
             cameras[:, 2],
             c="#0d2f4f",
-            s=10,
-            alpha=0.95,
+            s=5,
+            alpha=0.35,
             depthshade=False,
             label="Cameras",
         )
     ax.set_title(title)
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
+    if show_axis_labels:
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+    else:
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        ax.set_zlabel("")
     ax.set_facecolor("#fbf9f3")
-    _set_axes_equal(ax)
+    elev, azim = view if view is not None else (24, -58)
+    ax.view_init(elev=elev, azim=azim)
+    _set_axes_equal_from_points(ax, xyz, quantiles=bounds_quantiles, margin_scale=bounds_margin_scale)
+    if not show_ticks:
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_zticks([])
+    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+        axis.pane.fill = False
 
 
 def load_doppelgangers_df(root: Path, object_id: str):
@@ -344,6 +402,7 @@ def make_pair_strip(
     output = Image.new("RGB", (size[0] * 2, size[1]), color=(245, 244, 239))
     for column, filename in enumerate((image_a, image_b)):
         with Image.open(images_dir / filename) as image:
+            image = ImageOps.exif_transpose(image)
             tile = ImageOps.fit(image.convert("RGB"), size, method=Image.Resampling.LANCZOS)
         output.paste(tile, (column * size[0], 0))
     return output

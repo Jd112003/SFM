@@ -107,7 +107,7 @@ Debes llevar al menos:
 - `compose.yaml`
 - `Dockerfile`
 - `config.a100.yaml`
-- la carpeta `leon/`
+- la carpeta `data/leon/`
 
 ### 2. Verificar GPU dentro de Docker
 
@@ -137,7 +137,7 @@ docker compose run --rm sfm-gpu report --object leon --config config.a100.yaml
 O en una sola llamada:
 
 ```bash
-./run_leon_a100.sh
+bash ops/scripts/run_leon_a100.sh
 ```
 
 ### 5. Resultados
@@ -165,7 +165,12 @@ data/
     images/
     metadata.yaml
 outputs/
+ops/
+  scripts/
+  logs/
 config.yaml
+config.a100.yaml
+config.example.yaml
 ```
 
 ## Comandos principales
@@ -193,6 +198,6 @@ sfm-pipeline report --object botella --config config.yaml
   - elimina puntos con poca evidencia geometrica
   - intenta remover un plano dominante con RANSAC
   - conserva el componente 3D mas compatible con un objeto centrado por las camaras
-- Los scripts `run_leon_a100.sh` y `run_estatua_a100.sh` ya ejecutan `clean-model` por defecto despues de `reconstruct`.
+- Los scripts en `ops/scripts/` ya ejecutan `clean-model` por defecto despues de `reconstruct`.
 - `detect-doppelgangers` usa por defecto `matcher: exhaustive` sobre una base auxiliar `outputs/<objeto>/doppelgangers/database.db`, de modo que no toca la base principal de reconstruccion.
 - El umbral por defecto de doppelgangers se relajo a `max_inlier_ratio: 0.85` para capturar candidatos utiles en escenas reales donde los pares sospechosos no caen cerca de `0.25`.

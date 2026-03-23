@@ -1,5 +1,5 @@
 paths:
-  data_dir: .
+  data_dir: data
   outputs_dir: outputs
 
 colmap:
