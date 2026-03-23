@@ -294,6 +294,22 @@ El proyecto se implement\'o en Python 3 y se organiz\'o como un paquete reutiliz
 
 La estructura del proyecto se apoya tambi\'en en Docker, lo que permite ejecutar el mismo flujo tanto localmente como en GPU remota. Esta capa operativa es importante para reproducibilidad, pero para cumplir de mejor manera la consigna se agreg\'o un notebook de visualizaci\'on \texttt{notebooks/sfm\_visual\_workflow.ipynb}, que resume el pipeline por fases usando los artefactos ya generados.
 
+\subsection{Visualizador web y acceso remoto}
+
+Como complemento del pipeline de l\'inea de comandos se despleg\'o un visor web SSR en Nuxt 3 dentro de Docker y se public\'o mediante Cloudflare Tunnel, tambi\'en ejecutado en contenedor. Esto permiti\'o compartir una versi\'on navegable del modelo sin instalar dependencias adicionales en el host y sin exponer directamente puertos del servidor. Al momento de generar esta versi\'on del informe, el acceso remoto estaba disponible en \url{https://stories-procurement-publisher-drinks.trycloudflare.com}.
+
+El frontend se dej\'o configurado para abrir por defecto el objeto \emph{leon} y usar el tama\~no m\'aximo de punto (\texttt{0.050}), porque es el caso con mejor estabilidad global y el que comunica de forma m\'as clara la densidad del modelo filtrado. La Fig.~\ref{fig:tunnel_viewer} muestra tanto la interfaz completa servida por el t\'unel como una captura enfocada en el canvas del visor.
+
+\begin{figure}[!t]
+  \centering
+  \subfloat[Interfaz completa del visor publicada por el t\'unel.]{
+    \includegraphics[width=\columnwidth,height=0.24\textheight,keepaspectratio]{leon_tunnel_full.png}
+    \label{fig:tunnel_viewer_full}
+  }\\[-1mm]
+  \caption{Acceso remoto al visor web del modelo filtrado mediante Cloudflare Tunnel.}
+  \label{fig:tunnel_viewer}
+\end{figure}
+
 \section{Datasets y Dise\~no Experimental}\label{sec:exp}
 
 \subsection{Datasets}

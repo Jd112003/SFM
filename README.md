@@ -97,6 +97,29 @@ docker ps | grep sfm-viewer
 
 Y abre la URL correspondiente del host.
 
+### Exponer el visor con Cloudflare Tunnel en Docker
+
+Si no quieres instalar `cloudflared` en tu maquina, el `compose.yaml` ya incluye un servicio `cloudflare-tunnel` que publica el visor levantado en Docker.
+
+```bash
+docker compose up -d viewer
+docker compose up cloudflare-tunnel
+```
+
+El contenedor usa un tunnel rapido de Cloudflare y apunta al visor interno en `http://viewer:3000`, que corresponde al mismo frontend que publicas localmente en `http://localhost:3010`.
+
+Cuando arranque, `cloudflared` imprimira una URL publica `https://...trycloudflare.com` en los logs:
+
+```bash
+docker compose logs -f cloudflare-tunnel
+```
+
+Si luego quieres detenerlo:
+
+```bash
+docker compose stop cloudflare-tunnel
+```
+
 ## Correr `leon` en una A100
 
 ### 1. Copiar el proyecto a la maquina remota

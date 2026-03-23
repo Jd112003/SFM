@@ -8,9 +8,11 @@ type NavigationMode = 'orbit' | 'map'
 type ProjectionMode = 'perspective' | 'orthographic'
 
 const viewerRef = ref<InstanceType<typeof PointCloudViewer> | null>(null)
-const selectedId = ref<string>('')
+const DEFAULT_MODEL_ID = 'leon'
+const MAX_POINT_SIZE = 0.05
+
 const pointBudget = ref<number>(25000)
-const pointSize = ref<number>(0.018)
+const pointSize = ref<number>(MAX_POINT_SIZE)
 const showAxes = ref<boolean>(true)
 const showGrid = ref<boolean>(false)
 const colorMode = ref<ColorMode>('rgb')
@@ -19,10 +21,18 @@ const navigationMode = ref<NavigationMode>('orbit')
 const projectionMode = ref<ProjectionMode>('perspective')
 
 const { data: models, pending: modelsPending, error: modelsError } = await useFetch<ModelSummary[]>('/api/models')
+const initialSelectedId = models.value?.find((model) => model.id === DEFAULT_MODEL_ID)?.id ?? models.value?.[0]?.id ?? ''
+const selectedId = ref<string>(initialSelectedId)
 
 watchEffect(() => {
-  if (!selectedId.value && models.value?.length) {
-    selectedId.value = models.value[0].id
+  if (!models.value?.length) {
+    return
+  }
+
+  const defaultModel = models.value.find((model) => model.id === DEFAULT_MODEL_ID)
+
+  if (!selectedId.value || !models.value.some((model) => model.id === selectedId.value)) {
+    selectedId.value = defaultModel?.id ?? models.value[0].id
   }
 })
 

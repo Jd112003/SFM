@@ -57,3 +57,15 @@ services:
     volumes:
       - .:/workspace-data:ro
     init: true
+
+  cloudflare-tunnel:
+    image: cloudflare/cloudflared:latest
+    depends_on:
+      - viewer
+    command:
+      - tunnel
+      - --no-autoupdate
+      - --url
+      - http://viewer:3000
+    restart: unless-stopped
+    init: true
