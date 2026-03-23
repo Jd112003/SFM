@@ -22,6 +22,8 @@ export default defineEventHandler(async (event) => {
     points: cloud.pointCount,
     positions: cloud.positions,
     colors: cloud.colors,
+    cameraPositions: cloud.cameraPositions,
+    cameraRotations: cloud.cameraRotations,
     bounds: cloud.bounds
   }
 })

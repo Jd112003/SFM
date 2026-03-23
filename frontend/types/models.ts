@@ -15,6 +15,8 @@ export interface ModelPayload {
   originalPoints: number
   positions: number[]
   colors: number[]
+  cameraPositions: number[]
+  cameraRotations: number[]
   bounds: {
     min: [number, number, number]
     max: [number, number, number]

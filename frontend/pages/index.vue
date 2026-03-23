@@ -6,6 +6,7 @@ type ColorMode = 'rgb' | 'height' | 'mono'
 type BackgroundMode = 'light' | 'dark' | 'sand'
 type NavigationMode = 'orbit' | 'map'
 type ProjectionMode = 'perspective' | 'orthographic'
+type VisualizationMode = 'model' | 'cameras' | 'both'
 
 const viewerRef = ref<InstanceType<typeof PointCloudViewer> | null>(null)
 const DEFAULT_MODEL_ID = 'leon'
@@ -19,6 +20,8 @@ const colorMode = ref<ColorMode>('rgb')
 const backgroundMode = ref<BackgroundMode>('light')
 const navigationMode = ref<NavigationMode>('orbit')
 const projectionMode = ref<ProjectionMode>('perspective')
+const visualizationMode = ref<VisualizationMode>('model')
+const cameraSize = ref<number>(0.18)
 
 const { data: models, pending: modelsPending, error: modelsError } = await useFetch<ModelSummary[]>('/api/models')
 const initialSelectedId = models.value?.find((model) => model.id === DEFAULT_MODEL_ID)?.id ?? models.value?.[0]?.id ?? ''
@@ -112,6 +115,14 @@ const reductionLabel = computed(() => {
               <option value="orthographic">Orthographic</option>
             </select>
           </label>
+          <label class="field">
+            <span>Visualizacion</span>
+            <select v-model="visualizationMode">
+              <option value="model">Modelo</option>
+              <option value="cameras">Camaras</option>
+              <option value="both">Modelo + camaras</option>
+            </select>
+          </label>
           <p class="hint" v-if="navigationMode === 'map'">
             Modo Map: click izquierdo para pan, click derecho para rotar, rueda para zoom al cursor.
           </p>
@@ -149,6 +160,10 @@ const reductionLabel = computed(() => {
           <label class="field">
             <span>Tamano de punto: {{ pointSize.toFixed(3) }}</span>
             <input v-model.number="pointSize" type="range" min="0.006" max="0.05" step="0.002">
+          </label>
+          <label class="field">
+            <span>Tamano de camaras: {{ cameraSize.toFixed(3) }}</span>
+            <input v-model.number="cameraSize" type="range" min="0.05" max="0.5" step="0.01">
           </label>
           <label class="toggle">
             <input v-model="showAxes" type="checkbox">
@@ -195,6 +210,8 @@ const reductionLabel = computed(() => {
           :background-mode="backgroundMode"
           :navigation-mode="navigationMode"
           :projection-mode="projectionMode"
+          :visualization-mode="visualizationMode"
+          :camera-size="cameraSize"
         />
       </section>
     </section>
