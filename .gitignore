@@ -12,3 +12,7 @@ ops/logs/
 *.db
 *.sqlite
 *.log
+
+buda/
+estatua/
+leon/
